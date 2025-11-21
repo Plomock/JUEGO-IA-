@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>The Neon Trials — Corregido</title>
+<style>
+body {margin:0; font-family:'Courier New', monospace; background:#0a0a0a; color:#00ffcc; text-align:center;}
+#gameCanvas {border:3px solid #00ffcc; background: linear-gradient(to top,#1a1a1a,#0a0a0a); display:block; margin:20px auto; border-radius:10px;}
+.screen {display:none; padding:20px;}
+.active {display:block;}
+.character-card {display:inline-block; width:200px; border:2px solid #00ffcc; border-radius:10px; margin:10px; padding:15px; cursor:pointer; transition:transform 0.3s, background 0.3s;}
+.character-card:hover {transform:scale(1.05); background: rgba(0,255,204,0.1);}
+#score {font-size:22px; margin:10px;}
+button {margin:10px; padding:10px 20px; font-size:16px; border:2px solid #00ffcc; border-radius:8px; background:#000; color:#00ffcc; cursor:pointer; transition:0.2s;}
+button:hover {background:#00ffcc; color:#000;}
+#gameButtons {margin-top:10px;}
+#cooldownBar {width:200px; height:20px; border:2px solid #00ffcc; margin:10px auto; border-radius:5px; background:#000;}
+#cooldownFill {height:100%; width:100%; background:#00ffcc; border-radius:3px;}
+.small-note {font-size:12px; color:#99ffee;}
+</style>
+</head>
+<body>
+
+<!-- Lore inicial -->
+<div id="lore" class="screen active">
+  <h1>The Neon Trials</h1>
+  <p>En NeoPanem, las megacorporaciones gobiernan con mano de hierro. Los Neon Trials son un espectáculo de supervivencia donde rebeldes y gladiadores urbanos compiten por su libertad y fama.</p>
+  <button onclick="showCharacters()">Elegir Personaje</button>
+  <button onclick="startGame(characters[0])">Jugar Rápido con Kael</button>
+</div>
+
+<!-- Selección de personajes -->
+<div id="characters" class="screen">
+  <h2>Selecciona tu corredor</h2>
+  <div id="charList"></div>
+</div>
+
+<!-- Pantalla de juego -->
+<div id="game" class="screen">
+  <canvas id="gameCanvas" width="800" height="300"></canvas>
+  <div id="score">Puntuación: 0</div>
+  <div id="gameButtons">
+    <button onclick="showCharactersFromGame()">Cambiar Personaje</button>
+    <button onclick="resetGame()">Volver a Jugar</button>
+    <div id="cooldownBar"><div id="cooldownFill"></div></div>
+    <p class="small-note">Controles: Espacio = Saltar | ↓ = Agacharse | Shift = Habilidad Especial/Doble Salto | R = Reiniciar</p>
+  </div>
+</div>
+
+<!-- Sonidos -->
+<audio id="jumpSound" src="https://actions.google.com/sounds/v1/cartoon/wood_plank_flicks.ogg"></audio>
+<audio id="crashSound" src="https://actions.google.com/sounds/v1/cartoon/clang_and_wobble.ogg"></audio>
+<audio id="specialSound" src="https://actions.google.com/sounds/v1/cartoon/woodpecker.ogg"></audio>
+
+<script>
+/*
+  Diseño: cada personaje tiene abilityType. Al reset del juego se copia esa información al player.
+  Al pulsar Shift, según abilityType se activa el efecto. El doble salto sólo se permite si se ha activado.
+*/
+
+const characters = [
+  { name: "Kael",  lore:"Huérfano del Distrito 7. Experto en hacking y saltos.", ability:"Salto cargado: doble salto (al activar especial).", abilityType: "doubleJump" },
+  { name: "Lyra",  lore:"Hacker fantasma, experta en sigilo.", ability:"Caída controlada: +10 pts al chocar (cuando está intangible).", abilityType: "intangible" },
+  { name: "Dante", lore:"Gladiador cibernético con implantes.", ability:"Velocidad Berserk: aumenta la velocidad temporalmente.", abilityType: "speedBoost" },
+  { name: "Nira",  lore:"Mensajera del viento, rápida y ágil.", ability:"Esquive fantasmal: destruye obstáculos cercanos.", abilityType: "destroyObstacles" },
+  { name: "Orion", lore:"Heredero caído, estratega.", ability:"Aura de Dominio: escudo que bloquea un impacto.", abilityType: "shield" }
+];
+
+let currentChar = null;
+let canvas, ctx;
+let player = null;
+let obstacles = [];
+let score = 0;
+let gameInterval = null;
+let frameCount = 0;
+let cooldown = 100; // 0..100
+const gravityConst = 1;
+
+function showCharacters(){
+  document.getElementById('lore').classList.remove('active');
+  document.getElementById('characters').classList.add('active');
+  renderCharacters();
+}
+function showCharactersFromGame(){
+  // Pausa/para el juego y muestra selección
+  clearInterval(gameInterval);
+  document.getElementById('game').classList.remove('active');
+  document.getElementById('characters').classList.add('active');
+  renderCharacters();
+}
+
+function renderCharacters(){
+  const list = document.getElementById('charList');
+  list.innerHTML = '';
+  characters.forEach(c => {
+    const card = document.createElement('div');
+    card.className = 'character-card';
+    card.innerHTML = `<h3>${c.name}</h3><p>${c.lore}</p><p><b>Habilidad:</b> ${c.ability}</p>`;
+    card.addEventListener('click', ()=> startGame(c));
+    list.appendChild(card);
+  });
+}
+
+function startGame(character){
+  currentChar = character;
+  document.getElementById('characters').classList.remove('active');
+  document.getElementById('game').classList.add('active');
+  canvas = document.getElementById('gameCanvas');
+  ctx = canvas.getContext('2d');
+  resetGame();
+}
+
+function resetGame(){
+  // Inicializa player y copia la información de habilidad del personaje
+  player = {
+    x:50, y: 300 - 30, width:30, height:30, vy:0, gravity: gravityConst, jumpPower:15,
+    onGround:true,
+    // estados relacionados con habilidad
+    abilityType: currentChar ? currentChar.abilityType : null,
+    // efectos activables
+    doubleJump:false, canDouble:true, doubleJumpUsed:false,
+    intangible:false,
+    speedBoost:false,
+    shield:false,
+    destroyObstacles:false,
+    // estado general
+    trail:[],
+    specialReady: true
+  };
+  obstacles = [];
+  score = 0;
+  frameCount = 0;
+  cooldown = 100;
+  updateCooldownUI();
+  clearInterval(gameInterval);
+  gameInterval = setInterval(updateGame, 30);
+}
+
+function updateGame(){
+  if(!ctx || !canvas) return;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // Física simple
+  player.y += player.vy;
+  if(player.y + player.height < canvas.height){
+    player.vy += player.gravity;
+    player.onGround = false;
+  } else {
+    // en suelo
+    player.y = canvas.height - player.height;
+    player.vy = 0;
+    if(!player.onGround){
+      // al aterrizar recuperar posibilidad de doble salto
+      player.onGround = true;
+      player.canDouble = true;
+      player.doubleJumpUsed = false;
+    }
+  }
+
+  // Trail (estético)
+  if(player.trail.length > 6) player.trail.shift();
+  player.trail.push({x:player.x, y:player.y});
+  for(let t of player.trail){
+    ctx.fillStyle = 'rgba(0,255,204,0.15)';
+    ctx.fillRect(t.x, t.y, player.width, player.height);
+  }
+
+  // Dibujo jugador (colores según estado)
+  if(player.doubleJumpUsed) ctx.fillStyle = 'orange';
+  else if(player.intangible) ctx.fillStyle = 'rgba(0,255,204,0.45)';
+  else if(player.speedBoost) ctx.fillStyle = '#00aaff';
+  else ctx.fillStyle = '#00ffcc';
+  ctx.fillRect(player.x, player.y, player.width, player.height);
+
+  // Generar obstáculos
+  if(Math.random() < 0.03){
+    const r = Math.random();
+    const type = r < 0.4 ? 'normal' : r < 0.7 ? 'purple' : 'giant';
+    const y = (type === 'normal') ? (canvas.height - 30) : (type === 'purple' ? canvas.height - 50 : canvas.height - 60);
+    const w = (type === 'giant') ? 60 : 30;
+    const h = (type === 'giant') ? 60 : 30;
+    obstacles.push({ x: canvas.width, y: y, width: w, height: h, type: type });
+  }
+
+  // Mover y dibujar obstáculos
+  obstacles.forEach(o => {
+    o.x -= (player.speedBoost ? 10 : 5);
+    ctx.fillStyle = o.type === 'normal' ? '#ff0066' : o.type === 'purple' ? '#aa00ff' : '#ff5500';
+    ctx.fillRect(o.x, o.y, o.width, o.height);
+  });
+
+  // Colisiones
+  for(let i = obstacles.length - 1; i >= 0; i--){
+    const o = obstacles[i];
+    const collide = player.x < o.x + o.width && player.x + player.width > o.x && player.y < o.y + o.height && player.y + player.height > o.y;
+    if(collide){
+      if(player.intangible){
+        // Lyra: si es intangible, al chocar suma +10 y atraviesa (remover obstáculo)
+        if(player.abilityType === 'intangible'){
+          score += 10;
+          flashEffect('red');
+          obstacles.splice(i,1);
+          continue;
+        }
+      }
+      if(player.destroyObstacles){
+        // Nira: destruir obstáculo
+        obstacles.splice(i,1);
+        explosionEffect(o.x,o.y);
+        score += 5;
+        continue;
+      }
+      if(player.shield){
+        // bloquea un impacto
+        player.shield = false;
+        obstacles.splice(i,1);
+        flashEffect('blue');
+        continue;
+      }
+      // sin protección -> perder
+      document.getElementById('crashSound').play();
+      clearInterval(gameInterval);
+      alert("Has perdido! Puntuación: " + score);
+      return;
+    }
+  }
+
+  // Limpiar obstáculos fuera de pantalla
+  obstacles = obstacles.filter(o => o.x + o.width > 0);
+
+  // Aumentar puntuación con el tiempo
+  if(frameCount % 5 === 0) score++;
+  document.getElementById('score').innerText = "Puntuación: " + score;
+
+  // Cooldown de la habilidad: si no está ready, recargar
+  if(!player.specialReady && cooldown < 100){
+    cooldown += 1;
+    if(cooldown >= 100){
+      cooldown = 100;
+      player.specialReady = true;
+    }
+    updateCooldownUI();
+  }
+
+  frameCount++;
+}
+
+function flashEffect(color){
+  ctx.fillStyle = color;
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  // efecto breve
+  setTimeout(()=>{ /* se limpia en el siguiente frame */ }, 80);
+}
+function explosionEffect(x,y){
+  ctx.fillStyle='orange'; ctx.beginPath(); ctx.arc(x+15,y+15,20,0,2*Math.PI); ctx.fill();
+}
+
+// Teclas
+document.addEventListener('keydown', e => {
+  if(!player) return;
+
+  // Salto (Space)
+  if(e.code === 'Space'){
+    if(player.onGround){
+      player.vy = -player.jumpPower;
+      player.onGround = false;
+      document.getElementById('jumpSound').play();
+    } else {
+      // Doble salto: sólo si la habilidad de doble salto está activa (player.doubleJump)
+      if(player.doubleJump && player.canDouble){
+        player.vy = -player.jumpPower;
+        player.canDouble = false;
+        player.doubleJumpUsed = true;
+        document.getElementById('jumpSound').play();
+      }
+    }
+  }
+
+  // Agacharse (flecha abajo)
+  if(e.code === 'ArrowDown'){ player.height = 15; }
+
+  // Habilidad especial (Shift) - usar e.key === 'Shift' para cubrir ambos
+  if(e.key === 'Shift'){
+    if(player.specialReady){
+      // activar
+      player.specialReady = false;
+      cooldown = 0;
+      updateCooldownUI();
+      document.getElementById('specialSound').play();
+
+      switch(player.abilityType){
+        case 'doubleJump':
+          // activa la capacidad de doble salto hasta que se use
+          player.doubleJump = true;
+          // no removemos automáticamente; se consume con el salto (player.canDouble false al usar)
+          break;
+        case 'intangible':
+          // Lyra: hacerse intangible temporalmente
+          player.intangible = true;
+          setTimeout(()=>{ player.intangible = false; }, 2000);
+          break;
+        case 'speedBoost':
+          player.speedBoost = true;
+          setTimeout(()=>{ player.speedBoost = false; }, 2000);
+          break;
+        case 'destroyObstacles':
+          // Remueve obstáculos cercanos (100px delante)
+          obstacles = obstacles.filter(o => !(o.x - player.x < 100 && o.x - player.x > 0));
+          break;
+        case 'shield':
+          // Otorga un escudo que cancelará el próximo impacto
+          player.shield = true;
+          break;
+        default:
+          // ningún personaje seleccionado o sin habilidad
+          break;
+      }
+    }
+  }
+
+  // Reiniciar
+  if(e.code === 'KeyR'){ resetGame(); }
+});
+
+document.addEventListener('keyup', e => {
+  if(!player) return;
+  if(e.code === 'ArrowDown') player.height = 30;
+});
+
+function updateCooldownUI(){
+  const fill = document.getElementById('cooldownFill');
+  if(!fill) return;
+  // ancho seguro entre 0 y 100
+  const w = Math.max(0, Math.min(100, cooldown));
+  fill.style.width = w + '%';
+}
+
+// Inicializar UI inicial
+updateCooldownUI();
+
+</script>
+
+</body>
+</html>
